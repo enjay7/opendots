@@ -13,6 +13,7 @@ import {
   agentRunTimeoutMsFromEnv,
   intelligenceApiKeyFromEnv,
   intelligenceWsUrlFromEnv,
+  localAgentConfigFromEnv,
   type PlatformConfig,
 } from './platform-config.js';
 const host = process.env.HOST ?? '127.0.0.1';
@@ -32,6 +33,7 @@ const workspace = new WorkspaceStore(
   process.env.OWNER_ID ?? 'opendots-owner',
 );
 const config: PlatformConfig = {
+  ...localAgentConfigFromEnv(process.env),
   intelligenceKey: intelligenceApiKeyFromEnv(process.env),
   intelligenceApiUrl: process.env.INTELLIGENCE_API_URL || undefined,
   intelligenceWsUrl: intelligenceWsUrlFromEnv(process.env),

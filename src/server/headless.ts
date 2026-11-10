@@ -1,4 +1,5 @@
 import { IntelligenceAgent } from '@copilotkit/core';
+import { HttpAgent } from '@ag-ui/client';
 import type { Message } from '@ag-ui/core';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -15,11 +16,17 @@ export function currentTurnText(messages: Message[], error?: Error): string {
   return content;
 }
 
-const runtimeInfoSchema = z.object({
-  mode: z.literal('intelligence'),
-  intelligence: z.object({ wsUrl: z.url() }),
-  agents: z.record(z.string(), z.unknown()),
-});
+const runtimeInfoSchema = z.discriminatedUnion('mode', [
+  z.object({
+    mode: z.literal('intelligence'),
+    intelligence: z.object({ wsUrl: z.url() }),
+    agents: z.record(z.string(), z.unknown()),
+  }),
+  z.object({
+    mode: z.literal('sse'),
+    agents: z.record(z.string(), z.unknown()),
+  }),
+]);
 
 export async function runThreadTurn(
   runtimeUrl: string,
@@ -39,18 +46,90 @@ export async function runThreadTurn(
     throw new Error('The selected Dot is unavailable in the runtime.');
   // Core's runtime discovery is browser-only. Use the SDK's Node-compatible
   // Intelligence agent for voice compute and scheduled server turns.
-  const agent = new IntelligenceAgent({
-    url: info.intelligence.wsUrl,
+  const common = {
     runtimeUrl,
     agentId: dotId,
     headers,
-    fetch: (input, init) =>
+    fetch: (input: RequestInfo | URL, init?: RequestInit) =>
       fetch(input, {
         ...init,
         signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
       }),
-  });
+  };
+  const agent =
+    info.mode === 'intelligence'
+      ? new IntelligenceAgent({ ...common, url: info.intelligence.wsUrl })
+      : new HttpAgent({
+          ...common,
+          url: `${runtimeUrl}/agent/${encodeURIComponent(dotId)}/run`,
+        });
   agent.threadId = threadId;
+  if (info.mode !== 'intelligence') {
+    const history = await fetch(
+      `${runtimeUrl}/threads/${encodeURIComponent(threadId)}/messages`,
+      { headers, signal },
+    );
+    if (!history.ok)
+      throw new Error(`Local conversation returned HTTP ${history.status}.`);
+    const body = z
+      .object({ messages: z.array(z.unknown()) })
+      .parse(await history.json());
+    const { MessageSchema } = await import('@ag-ui/core');
+    agent.messages = body.messages.map((message) => {
+      // Threads REST flattens function calls for the frontend's thread library;
+      // the AG-UI run API requires the canonical function-call message shape.
+      const flat = z
+        .object({
+          role: z.literal('assistant'),
+          toolCalls: z.array(
+            z.object({
+              id: z.string(),
+              name: z.string(),
+              args: z.unknown(),
+            }),
+          ),
+        })
+        .passthrough()
+        .safeParse(message);
+      return MessageSchema.parse(
+        flat.success
+          ? {
+              ...flat.data,
+              toolCalls: flat.data.toolCalls.map((call) => ({
+                id: call.id,
+                type: 'function',
+                function: {
+                  name: call.name,
+                  arguments:
+                    typeof call.args === 'string'
+                      ? call.args
+                      : JSON.stringify(call.args ?? {}),
+                },
+              })),
+            }
+          : message,
+      );
+    });
+    const results = new Set(
+      agent.messages.flatMap((message) =>
+        message.role === 'tool' ? [message.toolCallId] : [],
+      ),
+    );
+    const pendingReview = agent.messages.some(
+      (message) =>
+        message.role === 'assistant' &&
+        message.toolCalls?.some(
+          (call) =>
+            ['review_space_page', 'request_connection_action'].includes(
+              call.function.name,
+            ) && !results.has(call.id),
+        ),
+    );
+    if (pendingReview)
+      throw new Error(
+        'This conversation is waiting for owner review. Complete its approval card before scheduling more work.',
+      );
+  }
   let runError: Error | undefined;
   const subscription = agent.subscribe({
     onRunErrorEvent: ({ event }) => {

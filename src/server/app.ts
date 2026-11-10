@@ -104,7 +104,9 @@ export function createApp({
       tasks: store.tasks(),
       memories: store.memories(),
       mode: config.mode,
-      configured: configured(config),
+      configured: platform
+        ? platform.setup().missing.length === 0
+        : configured(config),
     }),
   );
   app.post('/api/tasks', async (c) => {

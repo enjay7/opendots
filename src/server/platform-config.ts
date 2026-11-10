@@ -50,6 +50,12 @@ function firstNonEmptyEnvValue(
 }
 
 export interface PlatformConfig extends WebConfig {
+  agentBackend?: 'model' | 'acp';
+  threadStorage?: 'intelligence' | 'local';
+  acpProvider?: 'codex' | 'claude' | 'kiro';
+  acpModel?: string;
+  acpCommand?: string;
+  acpArgs?: string[];
   intelligenceKey?: string;
   intelligenceApiUrl?: string;
   intelligenceWsUrl?: string;
@@ -80,9 +86,11 @@ export function setupStatus(
   activationFailed = false,
 ): SetupStatus {
   const missing = [
-    !config.intelligenceKey && INTELLIGENCE_KEY_MISSING_LABEL,
-    !config.apiKey && 'OPENAI_API_KEY',
-    !config.model && 'OPENAI_MODEL',
+    config.threadStorage !== 'local' &&
+      !config.intelligenceKey &&
+      INTELLIGENCE_KEY_MISSING_LABEL,
+    config.agentBackend !== 'acp' && !config.apiKey && 'OPENAI_API_KEY',
+    config.agentBackend !== 'acp' && !config.model && 'OPENAI_MODEL',
   ].filter((item): item is string => !!item);
   const declaredSlack = !!(
     config.slackChannel &&
@@ -96,13 +104,51 @@ export function setupStatus(
     : config.slackChannel || config.slackTeam || config.slackUsers.length
       ? 'setup_required'
       : 'not_configured';
+  if (config.threadStorage === 'local' && declaredSlack)
+    slack = 'requires_intelligence';
   return {
     intelligence: !!config.intelligenceKey,
-    model: !!(config.apiKey && config.model),
+    model: config.agentBackend === 'acp' || !!(config.apiKey && config.model),
     browser: !!(config.browserUrl && config.browserSecret),
     voice: !!(config.voiceKey && config.voiceModel && !missing.length),
     composio: !!config.composioApiKey,
     slack,
     missing,
+  };
+}
+
+export function localAgentConfigFromEnv(
+  env: Record<string, string | undefined>,
+): Pick<
+  PlatformConfig,
+  | 'agentBackend'
+  | 'threadStorage'
+  | 'acpProvider'
+  | 'acpModel'
+  | 'acpCommand'
+  | 'acpArgs'
+> {
+  const agentBackend = env.AGENT_BACKEND?.trim() || 'model';
+  const threadStorage = env.THREAD_STORAGE?.trim() || 'intelligence';
+  const acpProvider = env.ACP_PROVIDER?.trim() || 'codex';
+  if (agentBackend !== 'acp' && agentBackend !== 'model')
+    throw new Error('AGENT_BACKEND must be model or acp.');
+  if (threadStorage !== 'local' && threadStorage !== 'intelligence')
+    throw new Error('THREAD_STORAGE must be local or intelligence.');
+  if (!['codex', 'claude', 'kiro'].includes(acpProvider))
+    throw new Error('ACP_PROVIDER must be codex, claude, or kiro.');
+  const args: unknown = env.ACP_ARGS ? JSON.parse(env.ACP_ARGS) : undefined;
+  if (
+    args !== undefined &&
+    (!Array.isArray(args) || !args.every((arg) => typeof arg === 'string'))
+  )
+    throw new Error('ACP_ARGS must be a JSON string array.');
+  return {
+    agentBackend,
+    threadStorage,
+    acpProvider: acpProvider as 'codex' | 'claude' | 'kiro',
+    acpModel: env.ACP_MODEL?.trim() || undefined,
+    acpCommand: env.ACP_COMMAND?.trim() || undefined,
+    acpArgs: args as string[] | undefined,
   };
 }

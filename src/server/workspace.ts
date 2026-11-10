@@ -7,6 +7,12 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { validateLearningSettings } from '../shared/learning.js';
 import type { CallReceipt, Conversation, Dot, Space } from '../shared/types.js';
+import type { Message } from '@ag-ui/core';
+export interface LocalConversation {
+  messages: Message[];
+  state: Record<string, unknown>;
+  updatedAt: string;
+}
 export class WorkspaceStore {
   private db: DatabaseSync;
   readonly pages: Pages;
@@ -24,7 +30,8 @@ export class WorkspaceStore {
       CREATE TABLE IF NOT EXISTS thread_bindings(id TEXT PRIMARY KEY, dotId TEXT NOT NULL, ownerId TEXT NOT NULL, title TEXT NOT NULL, createdAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS task_threads(taskId TEXT PRIMARY KEY, threadId TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY, threadId TEXT NOT NULL, startedAt INTEGER NOT NULL, endedAt INTEGER, status TEXT NOT NULL, transcript TEXT NOT NULL, error TEXT);
-      CREATE TABLE IF NOT EXISTS captures(threadId TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS captures(threadId TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS local_conversations(ownerId TEXT NOT NULL, threadId TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(ownerId, threadId));`);
     for (const [table, column, definition] of [
       ['dots', 'learningContainerId', 'TEXT'],
       ['dots', 'skillDeliveryEnabled', 'INTEGER NOT NULL DEFAULT 0'],
@@ -296,6 +303,37 @@ export class WorkspaceStore {
     if (!thread || (dotId && thread.dotId !== dotId))
       throw new Error('Conversation does not belong to this Dot and owner.');
     return thread;
+  }
+  localConversation(id: string): LocalConversation {
+    this.requireThread(id);
+    const row = this.db
+      .prepare(
+        'SELECT value FROM local_conversations WHERE ownerId=? AND threadId=?',
+      )
+      .get(this.ownerId, id);
+    return row
+      ? (JSON.parse(String(row.value)) as LocalConversation)
+      : { messages: [], state: {}, updatedAt: new Date().toISOString() };
+  }
+  saveLocalConversation(
+    id: string,
+    messages: Message[],
+    state: Record<string, unknown>,
+  ) {
+    this.requireThread(id);
+    this.db
+      .prepare(
+        'INSERT INTO local_conversations VALUES (?, ?, ?) ON CONFLICT(ownerId, threadId) DO UPDATE SET value=excluded.value',
+      )
+      .run(
+        this.ownerId,
+        id,
+        JSON.stringify({
+          messages,
+          state,
+          updatedAt: new Date().toISOString(),
+        }),
+      );
   }
   bindTask(taskId: string, threadId: string) {
     this.requireThread(threadId);

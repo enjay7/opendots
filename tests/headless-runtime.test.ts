@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { AgentSubscriber } from '@ag-ui/client';
 import { runThreadTurn } from '../src/server/headless.js';
+import { HttpAgent } from '@ag-ui/client';
 const sdk = vi.hoisted(() => ({
   run: vi.fn(),
   detach: vi.fn(),
@@ -228,4 +229,108 @@ it('cleans up rejected SDK turns while preserving the error', async () => {
   ).rejects.toThrow('Runtime socket failed');
   expect(sdk.unsubscribe).toHaveBeenCalledOnce();
   expect(sdk.detach).toHaveBeenCalledOnce();
+});
+it('loads persisted history and uses the SSE agent for local scheduled turns', async () => {
+  const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url) =>
+    String(url).endsWith('/info')
+      ? Response.json({ mode: 'sse', agents: { dot: {} } })
+      : Response.json({
+          messages: [
+            {
+              id: 'old',
+              role: 'assistant',
+              content: 'Saved history',
+              toolCalls: [
+                { id: 'read', name: 'read_space_page', args: '{"id":"page"}' },
+              ],
+            },
+            {
+              id: 'result',
+              role: 'tool',
+              toolCallId: 'read',
+              content: '{"content":"Fictional page"}',
+            },
+          ],
+        }),
+  );
+  vi.stubGlobal('fetch', fetcher);
+  const run = vi
+    .spyOn(HttpAgent.prototype, 'runAgent')
+    .mockImplementation(async function (this: HttpAgent) {
+      expect(this.messages[0].content).toBe('Saved history');
+      expect(this.messages[0]).toMatchObject({
+        toolCalls: [
+          {
+            type: 'function',
+            function: { name: 'read_space_page', arguments: '{"id":"page"}' },
+          },
+        ],
+      });
+      expect(this.messages.at(-1)?.content).toBe('Local scheduled work');
+      return {
+        newMessages: [
+          { id: 'answer', role: 'assistant', content: 'Local result' },
+        ],
+        result: {},
+        state: {},
+      };
+    });
+  const detach = vi
+    .spyOn(HttpAgent.prototype, 'detachActiveRun')
+    .mockResolvedValue(undefined);
+  try {
+    expect(
+      await runThreadTurn(
+        'http://local/runtime',
+        {},
+        'dot',
+        'thread',
+        'Local scheduled work',
+        new AbortController().signal,
+      ),
+    ).toBe('Local result');
+    expect(run).toHaveBeenCalledOnce();
+    expect(detach).toHaveBeenCalledOnce();
+    expect(sdk.run).not.toHaveBeenCalled();
+  } finally {
+    run.mockRestore();
+    detach.mockRestore();
+  }
+});
+it('does not run scheduled work across an unresolved owner approval', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn<typeof fetch>().mockImplementation(async (url) =>
+      String(url).endsWith('/info')
+        ? Response.json({ mode: 'sse', agents: { dot: {} } })
+        : Response.json({
+            messages: [
+              {
+                id: 'review',
+                role: 'assistant',
+                content: '',
+                toolCalls: [
+                  { id: 'approval', name: 'review_space_page', args: '{}' },
+                ],
+              },
+            ],
+          }),
+    ),
+  );
+  const run = vi.spyOn(HttpAgent.prototype, 'runAgent');
+  try {
+    await expect(
+      runThreadTurn(
+        'http://local/runtime',
+        {},
+        'dot',
+        'thread',
+        'Scheduled work',
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('waiting for owner review');
+    expect(run).not.toHaveBeenCalled();
+  } finally {
+    run.mockRestore();
+  }
 });

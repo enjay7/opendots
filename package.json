@@ -8,7 +8,8 @@
   },
   "scripts": {
     "dev": "concurrently -k \"cross-env NODE_ENV=development node --env-file-if-exists=.env --import tsx --watch src/server/index.ts\" \"vite\"",
-    "build": "vite build && tsc -p tsconfig.server.json",
+    "build": "vite build && tsc -p tsconfig.server.json && node scripts/copy-acp-bridge.mjs",
+    "acp:smoke": "node --env-file-if-exists=.env --import tsx scripts/acp-smoke.ts",
     "start": "node --env-file-if-exists=.env dist/server/server/index.js",
     "browser": "node --env-file-if-exists=.env --import tsx src/browser/index.ts",
     "browser:start": "node --env-file-if-exists=.env dist/server/browser/index.js",
@@ -27,6 +28,9 @@
   "dependencies": {
     "@ag-ui/client": "^0.0.59",
     "@ag-ui/core": "^0.0.59",
+    "@agentclientprotocol/claude-agent-acp": "0.48.0",
+    "@agentclientprotocol/codex-acp": "0.0.46",
+    "@agentclientprotocol/sdk": "0.28.1",
     "@composio/core": "^0.22.0",
     "@copilotkit/channels": "^0.11.0",
     "@copilotkit/core": "^1.75.0",
@@ -54,6 +58,7 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "rxjs": "^7.8.1",
+    "smol-toml": "1.9.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {

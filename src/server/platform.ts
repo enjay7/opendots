@@ -22,6 +22,8 @@ import {
 import { validateRuntimeScope } from './runtime-scope.js';
 import { learningSelector } from './learning.js';
 import { SetupTelemetry } from './setup-telemetry.js';
+import { LocalThreads } from './local-threads.js';
+import { stopAcpSessions } from './acp-agent.js';
 export class Platform {
   private channelStartupFailed = false;
   readonly setupTelemetry: SetupTelemetry;
@@ -29,6 +31,7 @@ export class Platform {
   readonly computers: ComputerService;
   readonly connections: ConnectionService;
   readonly intelligence?: CopilotKitIntelligence;
+  readonly localThreads?: LocalThreads;
   readonly handler?: CopilotHonoApp;
   constructor(
     readonly store: Store,
@@ -42,22 +45,37 @@ export class Platform {
       () => store.settings().paused,
     );
     this.connections = new ConnectionService(workspace.connections);
+    if (config.threadStorage === 'local')
+      this.localThreads = new LocalThreads(workspace);
     this.pages = new PageService(workspace, () => {
       this.requireReady();
+      if (this.localThreads)
+        return {
+          getOrCreateThread: (input) =>
+            this.localThreads!.getOrCreateThread(input),
+          getThreadMessages: (input) =>
+            this.localThreads!.getThreadMessagesForOwner(input),
+        };
       return this.intelligence!;
     });
-    if (!config.intelligenceKey) return;
-    this.intelligence = new CopilotKitIntelligence({
-      apiKey: config.intelligenceKey,
-      apiUrl: config.intelligenceApiUrl,
-      wsUrl: config.intelligenceWsUrl,
-      getLearningContainerId: learningSelector(
-        workspace,
-        config.slackDotId ?? workspace.dots()[0]?.id,
-      ),
-    });
+    if (!config.intelligenceKey && !this.localThreads) return;
+    if (!this.localThreads)
+      this.intelligence = new CopilotKitIntelligence({
+        apiKey: config.intelligenceKey!,
+        apiUrl: config.intelligenceApiUrl,
+        wsUrl: config.intelligenceWsUrl,
+        getLearningContainerId: learningSelector(
+          workspace,
+          config.slackDotId ?? workspace.dots()[0]?.id,
+        ),
+      });
     const channels = [];
-    if (config.slackChannel && config.slackTeam && config.slackUsers.length) {
+    if (
+      this.intelligence &&
+      config.slackChannel &&
+      config.slackTeam &&
+      config.slackUsers.length
+    ) {
       const dotId = config.slackDotId ?? workspace.dots()[0].id;
       if (!workspace.dot(dotId))
         throw new Error('SLACK_DOT_ID does not identify an existing Dot.');
@@ -78,8 +96,7 @@ export class Platform {
       });
       channels.push(slack);
     }
-    const runtime = new CopilotRuntime({
-      intelligence: this.intelligence,
+    const options = {
       telemetryId: this.setupTelemetry.identity,
       telemetryProperties: this.setupTelemetry.metadata,
       identifyUser: async () => ({
@@ -102,9 +119,15 @@ export class Platform {
               ),
             ]),
         ),
-      channels,
-      generateThreadNames: true,
-    });
+    };
+    const runtime = this.localThreads
+      ? new CopilotRuntime({ ...options, runner: this.localThreads })
+      : new CopilotRuntime({
+          ...options,
+          intelligence: this.intelligence!,
+          channels,
+          generateThreadNames: true,
+        });
     this.handler = createCopilotHonoHandler({
       runtime,
       basePath: '/api/copilotkit',
@@ -122,9 +145,7 @@ export class Platform {
   requireReady() {
     const missing = this.setup().missing;
     if (missing.length)
-      throw new Error(
-        `Setup required: ${missing.join(', ')}. Conversations require CopilotKit Intelligence.`,
-      );
+      throw new Error(`Setup required: ${missing.join(', ')}.`);
   }
   async start() {
     this.setupTelemetry.start();
@@ -146,13 +167,15 @@ export class Platform {
   async stop() {
     await this.setupTelemetry.stop();
     await this.handler?.channels?.stop();
+    await this.localThreads?.shutdown();
+    await stopAcpSessions(this.config);
   }
   async createConversation(dotId: string, title: string) {
     this.requireReady();
     if (!this.workspace.dot(dotId)) throw new Error('Dot not found.');
     const id = randomUUID();
     try {
-      await this.intelligence!.createThread({
+      await (this.localThreads ?? this.intelligence!).createThread({
         threadId: id,
         userId: this.workspace.ownerId,
         agentId: dotId,
@@ -168,10 +191,15 @@ export class Platform {
   async history(threadId: string): Promise<string> {
     this.requireReady();
     this.workspace.requireThread(threadId);
-    const history = await this.intelligence!.getThreadMessages({
-      threadId,
-      userId: this.workspace.ownerId,
-    });
+    const history = await (this.localThreads
+      ? this.localThreads.getThreadMessagesForOwner({
+          threadId,
+          userId: this.workspace.ownerId,
+        })
+      : this.intelligence!.getThreadMessages({
+          threadId,
+          userId: this.workspace.ownerId,
+        }));
     return history.messages
       .filter((message) => ['user', 'assistant'].includes(message.role))
       .slice(-12)
